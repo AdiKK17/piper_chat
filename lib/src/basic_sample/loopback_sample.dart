@@ -11,7 +11,6 @@ import 'package:http/http.dart' as http;
 
 
 class LoopBackSample extends StatefulWidget {
-  static String tag = 'loopback_sample';
 
   @override
   _MyAppState createState() => new _MyAppState();
