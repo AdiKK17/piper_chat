@@ -5,7 +5,10 @@ import 'package:flutter_webrtc/webrtc.dart';
 import 'dart:core';
 import 'dart:async';
 
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter_socket_io/flutter_socket_io.dart';
+import 'package:flutter_socket_io/socket_io_manager.dart';
+import 'package:http/http.dart' as http;
+
 
 class LoopBackSample extends StatefulWidget {
   static String tag = 'loopback_sample';
@@ -15,38 +18,48 @@ class LoopBackSample extends StatefulWidget {
 }
 
 class _MyAppState extends State<LoopBackSample> {
-  MediaStream _localStream;
+  SocketIO socketIO;
 
+  MediaStream _localStream;
   RTCPeerConnection _peerConnection;
   final _localRenderer = new RTCVideoRenderer();
   final _remoteRenderer = new RTCVideoRenderer();
   bool _inCalling = false;
 
-  final db = Firestore.instance;
-  var roomRef;
+  var roomId;
   var roomText = "Hello";
 
-  StreamController streamController;
-  StreamController streamController1;
-
-//  var roomId;
   TextEditingController textController;
+
+  var calleeCandidates = [];
+  var answerSdp;
 
   @override
   initState() {
     super.initState();
     textController = TextEditingController();
-    streamController = new StreamController();
-    streamController1 = new StreamController();
+
+    //Creating the socket
+    socketIO = SocketIOManager().createSocketIO(
+      'https://singis.herokuapp.com/',
+      '/',
+    );
+
+    //Call init before doing anything with socket
+    socketIO.init();
+
+    //Connect to the socket
+    socketIO.connect();
+
     initRenderers();
   }
 
   @override
   void dispose() {
     // TODO: implement dispose
-      super.dispose();
-      streamController.close();
-      streamController1.close();
+    super.dispose();
+    socketIO.unSubscribesAll();
+    socketIO.disconnect();
   }
 
   @override
@@ -57,9 +70,7 @@ class _MyAppState extends State<LoopBackSample> {
     }
     _localRenderer.dispose();
     _remoteRenderer.dispose();
-//    streamController.close();
   }
-
 
 
   initRenderers() async {
@@ -94,28 +105,71 @@ class _MyAppState extends State<LoopBackSample> {
       return;
     }
     print('onCandidate: ' + candidate.candidate);
-    roomRef.collection('callerCandidates').add(candidate.toMap());
-    _peerConnection.addCandidate(candidate);
+    socketIO.sendMessage(
+        "add_caller_candidates",
+        json.encode({"roomId": roomId,"candidate": candidate.toMap()})
+    );
+//    _peerConnection.addCandidate(candidate);
   }
 
   _onCandidate121(RTCIceCandidate candidate) {
     if (candidate.candidate.isEmpty) {
       print("Got final candidate!");
+//      socketIO.sendMessage("get_callee_candidates", json.encode({"roomId": roomId}));
       return;
     }
     print('onCandidate: ' + candidate.candidate);
-    roomRef.collection('calleeCandidates').add(candidate.toMap());
-    _peerConnection.addCandidate(candidate);
+    socketIO.sendMessage(
+        "add_callee_candidates",
+        json.encode({"roomId": roomId,"candidate": candidate.toMap()})
+    );
+//    _peerConnection.addCandidate(candidate);
   }
 
   _onRenegotiationNeeded() {
     print('RenegotiationNeeded');
   }
 
+  _subscribeCreateRoomEvents() async {
+    socketIO.subscribe("recieve_answer_sdp", (answer) async {
+      print("recieve_answer_sdp");
+      Map<String,dynamic> answerSdp = json.decode(answer);
+      await _peerConnection.setRemoteDescription(new RTCSessionDescription(answerSdp["sdp"],answerSdp["type"]));
+      print("remote description set");
+    });
+
+    socketIO.subscribe("recieve_callee_candidates", (candidate) async {
+      Map<String,dynamic> candi = json.decode(candidate);
+      calleeCandidates.add(candidate);
+      print("recieve_callee_candidate");
+      print(calleeCandidates.length);
+      await _peerConnection.addCandidate(RTCIceCandidate(candi["candidate"], candi["sdpMid"], candi["sdpMLineIndex"]));
+    });
+  }
+
   // Platform messages are asynchronous, so we initialize in an async method.
   _makeCall() async {
-    roomRef = db.collection("rooms").document();
 
+    await _openMedia();
+
+    final response = await http.get("https://singis.herokuapp.com/create_room");
+    roomId = response.body;
+
+    await _subscribeCreateRoomEvents();
+
+    setState(() {
+      roomText =
+          "Current room is :-" + roomId + " - You are the Caller";
+    });
+
+//    Map<String, dynamic> configuration = {
+//      "iceServers":{
+//        "urls": [
+//              'stun:stun1.l.google.com:19302',
+//              'stun:stun2.l.google.com:19302',
+//              ]
+//        ,}
+//    };
     Map<String, dynamic> configuration = {
       "iceServers": [
         {"url": "stun:stun.l.google.com:19302"},
@@ -140,9 +194,6 @@ class _MyAppState extends State<LoopBackSample> {
     if (_peerConnection != null) return;
 
     try {
-      await _openMedia();
-      _localRenderer.srcObject = _localStream;
-
       _peerConnection =
           await createPeerConnection(configuration, loopback_constraints);
 
@@ -155,78 +206,34 @@ class _MyAppState extends State<LoopBackSample> {
       _peerConnection.onRenegotiationNeeded = _onRenegotiationNeeded;
 
       _peerConnection.addStream(_localStream);
+
       RTCSessionDescription description =
           await _peerConnection.createOffer(offer_sdp_constraints);
       print(description.sdp);
       _peerConnection.setLocalDescription(description);
 
-      final roomWithOffer = {
-        'offer': {
+      final roomWithOffer = json.encode({
+        "offer": {
           "type": description.type,
           "sdp": description.sdp,
         },
-      };
+        "roomId": roomId
+      });
 
-      await roomRef.setData(roomWithOffer);
+      socketIO.sendMessage(
+          "create_room",
+          roomWithOffer
+      );
+
       setState(() {
         roomText =
-            "Current room is :-" + roomRef.documentID + " - You are the Caller";
+            "Current room is :-" + roomId + " - You are the Caller";
       });
 
       //change for loopback.
       //setting remote description
 
-      print("312312312312314343");
-      streamController.addStream(roomRef.snapshots());
-      streamController.stream.listen((event) async {
-
-        final data = event.data;
-
-        if(event.data["answer"] != null) {
-          print(data["answer"]["sdp"]);
-          print(data["answer"]["type"]);
-          final rtcSessionDescription = new RTCSessionDescription(data["answer"]["sdp"],data["answer"]["type"]);
-          await _peerConnection.setRemoteDescription(rtcSessionDescription);
-        }
-
-        print("jajajajajjajaj");
-        print("jajajajajjajaj");
-        print("jajajajajjajaj");
-
-      });
-      print("312312312312314343");
-      
-      streamController1.addStream(roomRef.collection("calleeCandidates").snapshots());
-      streamController1.stream.listen((candi) {
-        print("object");
-        print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
-        print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
-        print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<");
-        print(candi);
-
-        candi.getDocuments().forEach((change) {
-            print(change);
-        });
-      });
-
-
-
-//      StreamBuilder<QuerySnapshot>(
-//        stream: roomRef.collection('calleeCandidates').snapshots(),
-//        builder: (BuildContext context, AsyncSnapshot<QuerySnapshot> snapshot) {
-//
-//          snapshot.data.documentChanges.forEach((element) {
-//            if(element.type.toString() ==  "added"){
-//              print("heloassdasdaso");
-//              print(element.document.data);
-//            }
-//          });
-//
-//          return Container();
-//        },
-//      );
-
-      description.type = 'answer';
+//      description.type = "answer";
 //      _peerConnection.setRemoteDescription(description);
 
       _localStream.getAudioTracks()[0].setMicrophoneMute(false);
@@ -237,6 +244,7 @@ class _MyAppState extends State<LoopBackSample> {
 
     _inCalling = true;
   }
+
 
   _openMedia() async {
     final Map<String, dynamic> mediaConstraints = {
@@ -253,24 +261,21 @@ class _MyAppState extends State<LoopBackSample> {
       }
     };
     _localStream = await navigator.getUserMedia(mediaConstraints);
+    _localRenderer.srcObject = _localStream;
   }
 
   _joinRoom() async {
 
-    final roomId = textController.text;
-    print(roomId);
-
-    roomRef = db.collection("rooms").document(roomId);
-
     await _openMedia();
-    _localRenderer.srcObject = _localStream;
+
+    roomId = textController.text;
     setState(() {
       roomText = "Current room is :-" + roomId + " - You are the Callee";
     });
 
-    //
-    final roomSnapshot = await roomRef.get();
-    //
+    socketIO.sendMessage('join_room',
+    json.encode({"roomId": roomId}));
+
 
     Map<String, dynamic> configuration = {
       "iceServers": [
@@ -296,6 +301,7 @@ class _MyAppState extends State<LoopBackSample> {
     _peerConnection =
         await createPeerConnection(configuration, loopback_constraints);
 
+    print("<<<<<<<<<<<<<<<<<1>>>>>>>>>>>>>>>>");
     _peerConnection.onSignalingState = _onSignalingState;
     _peerConnection.onIceGatheringState = _onIceGatheringState;
     _peerConnection.onIceConnectionState = _onIceConnectionState;
@@ -304,38 +310,42 @@ class _MyAppState extends State<LoopBackSample> {
     _peerConnection.onIceCandidate = _onCandidate121;
     _peerConnection.onRenegotiationNeeded = _onRenegotiationNeeded;
 
-    final offer = roomSnapshot.data["offer"];
+    _peerConnection.addStream(_localStream);
+
+    print("<<<<<<<<<<<<<<<<<2>>>>>>>>>>>>>>>>");
+    final response = await http.post("https://singis.herokuapp.com/get_room_details",body: json.encode({"roomId": roomId}),headers: {"Content-Type" : "application/json"});
+    final responseData = json.decode(response.body);
+
+    print("<<<<<<<<<<<<<<<<<3>>>>>>>>>>>>>>>>");
+
+    final offer = responseData["offerSdp"];
     await _peerConnection
         .setRemoteDescription(new RTCSessionDescription(offer["sdp"], offer["type"]));
 
     final answer = await _peerConnection.createAnswer(answer_sdp_constraints);
     await _peerConnection.setLocalDescription(answer);
 
-    final roomWithAnswer = {
+    final roomWithAnswer = json.encode({
       "answer": {
         "type": answer.type,
         "sdp": answer.sdp,
       },
-    };
+      "roomId": roomId
+    });
 
-    await roomRef.updateData(roomWithAnswer);
+    socketIO.sendMessage('add_answer_sdp', roomWithAnswer);
 
-    setState(() {});
+    responseData["callerCandidates"].forEach((candidate) async {
+      calleeCandidates.add(candidate);
+      print("recieve_caller_candidate");
+      print(calleeCandidates.length);
+      if(candidate["candidate"] != null) {
+        await _peerConnection.addCandidate(new RTCIceCandidate(
+            candidate["candidate"], candidate["sdpMid"],
+            candidate["sdpMLineIndex"]));
+      }
+    });
 
-//          StreamBuilder<QuerySnapshot>(
-//        stream: roomRef.collection('callerCandidates').snapshots(),
-//        builder: (BuildContext context, AsyncSnapshot<QuerySnapshot> snapshot) {
-//
-//          snapshot.data.documentChanges.forEach((element) {
-//            if(element.type.toString() ==  "added"){
-//              print("heloassdasdaso");
-//              print(element.document.data);
-//            }
-//          });
-//
-//          return Container();
-//        },
-//      );
   }
 
   _deleteRoom() {}
@@ -360,6 +370,12 @@ class _MyAppState extends State<LoopBackSample> {
     return new Scaffold(
       appBar: new AppBar(
         title: new Text('LoopBack example'),
+        actions: <Widget>[IconButton(icon: Icon(Icons.description), onPressed: (){
+           socketIO.sendMessage(
+              "show_room",
+        json.encode({"roomId": roomId})
+          );
+        })],
       ),
       body: new SingleChildScrollView(
         child: OrientationBuilder(
