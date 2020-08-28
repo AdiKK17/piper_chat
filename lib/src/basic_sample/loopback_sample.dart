@@ -12,11 +12,14 @@ import 'package:http/http.dart' as http;
 
 class LoopBackSample extends StatefulWidget {
 
+
+
   @override
   _MyAppState createState() => new _MyAppState();
 }
 
 class _MyAppState extends State<LoopBackSample> {
+
   SocketIO socketIO;
 
   MediaStream _localStream;
@@ -36,20 +39,6 @@ class _MyAppState extends State<LoopBackSample> {
   @override
   initState() {
     super.initState();
-    textController = TextEditingController();
-
-    //Creating the socket
-    socketIO = SocketIOManager().createSocketIO(
-      'https://singis.herokuapp.com/',
-      '/',
-    );
-
-    //Call init before doing anything with socket
-    socketIO.init();
-
-    //Connect to the socket
-    socketIO.connect();
-
     initRenderers();
   }
 
@@ -57,8 +46,6 @@ class _MyAppState extends State<LoopBackSample> {
   void dispose() {
     // TODO: implement dispose
     super.dispose();
-    socketIO.unSubscribesAll();
-    socketIO.disconnect();
   }
 
   @override
